@@ -17,7 +17,7 @@
 pip install -r requirements.txt
 ```
 
-3. **Запустите приложение:**
+3. **Запустите приложение локально:**
 ```bash
 python -m uvicorn main:app --reload
 ```
