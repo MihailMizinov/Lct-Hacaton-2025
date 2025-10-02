@@ -7,3 +7,8 @@ Flask==2.3.3
 Werkzeug==2.3.7
 python-dotenv==1.0.0
 
+
+joblib~=1.5.2
+numpy~=2.3.3
+sentence-transformers~=5.1.1
+
