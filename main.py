@@ -1,3 +1,4 @@
+import joblib
 from fastapi import FastAPI, UploadFile, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 import json
@@ -23,13 +24,13 @@ data_storage = {
     "all_sentiments": set()
 }
 
+topic_model = joblib.load("model.pkl")        # Модель тем
+vectorizer = joblib.load("vectorizer.pkl")   # BoW для сентимента
+sentiment_clf = joblib.load("model_clf.pkl") # Классификатор сентимента
+
 # --- Модель для эмбеддингов ---
 embed_model = SentenceTransformer('sentence-transformers/distiluse-base-multilingual-cased-v2')
 
-# --- Модель для сентимента (обученная заранее на эмбеддингах) ---
-MODEL_DIR = "model"
-with open(os.path.join(MODEL_DIR, "sentiment_clf.pkl"), "rb") as f:
-    sentiment_clf = pickle.load(f)
 
 # --- Ключевые слова для тем ---
 label_keywords = {
@@ -66,21 +67,39 @@ def assign_multilabels(text):
     return labels
 
 # --- Функция предсказания ---
-def ml_predict(text: str, idx: int):
-    # Темы через ключевые слова
-    topics = [label_translation.get(label, label) for label in assign_multilabels(text)]
+def ml_predict(text: str, idx: int, top_n=3):
+    # --- Быстрые темы через ключевые слова ---
+    labels = assign_multilabels(text)
+    topics = [label_translation.get(label, label) for label in labels]
 
-    # Сентимент через ML на эмбеддингах
-    embedding = embed_model.encode([text], show_progress_bar=False)
-    sentiment_pred = sentiment_clf.predict(embedding)
+    # --- Если темы не найдены, fallback на нейронку ---
+    if labels == ['general']:
+        embedding = embed_model.encode([text], show_progress_bar=False)
+        topic_probs = topic_model.predict_proba(embedding)[0]
+        all_topics = ['Общее', 'Мобильное приложение', 'Кредиты', 'Вклады', 'Бонусы',
+                      'Служба поддержки', 'Безопасность', 'Переводы', 'Приложение',
+                      'Сеть банкоматов', 'Платежи', 'Комиссии', 'Инвестиции']
+        top_indices = np.argsort(topic_probs)[-top_n:][::-1]
+        topics = [all_topics[i] for i in top_indices]
+
+    # --- Сентимент через BoW ---
+    X_vec = vectorizer.transform([text])
+    sentiment_pred = sentiment_clf.predict(X_vec)
+    sentiment_prob = sentiment_clf.predict_proba(X_vec)[0]
+    sentiment_dict = dict(zip(sentiment_clf.classes_, sentiment_prob))
+
     sentiments = [sentiment_pred[0]]
+    if sentiment_dict.get("neutral", 0) > 0.07 and "neutral" not in sentiments:
+        sentiments.append("neutral")
 
     return {
         "id": idx,
         "text": text,
         "topics": topics,
-        "sentiments": sentiments
+        "sentiments": sentiments,
+        "sentiment_prob": sentiment_dict
     }
+
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
