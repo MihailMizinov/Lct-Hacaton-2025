@@ -24,12 +24,27 @@ data_storage = {
     "all_sentiments": set()
 }
 
-topic_model = joblib.load("model.pkl")        # Модель тем
-vectorizer = joblib.load("vectorizer.pkl")   # BoW для сентимента
-sentiment_clf = joblib.load("model_clf.pkl") # Классификатор сентимента
-
+_models_lock = threading.Lock()
+_embed_model = None
+_sentiment_clf = None
+_topic_model = None
+_vectorizer = None
 # --- Модель для эмбеддингов ---
-embed_model = SentenceTransformer('sentence-transformers/distiluse-base-multilingual-cased-v2')
+def get_models():
+    global _embed_model, _sentiment_clf, _topic_model, _vectorizer
+    with _models_lock:
+        if _embed_model is None:
+            from sentence_transformers import SentenceTransformer
+            _embed_model = SentenceTransformer('sentence-transformers/distiluse-base-multilingual-cased-v2')
+            with open("model_clf.pkl", "rb") as f:
+                _sentiment_clf = pickle.load(f)
+            try:
+                _topic_model = joblib.load("topic_model.pkl")
+                _vectorizer = joblib.load("vectorizer.pkl")
+            except FileNotFoundError:
+                _topic_model = None
+                _vectorizer = None
+    return _embed_model, _sentiment_clf, _topic_model, _vectorizer
 
 
 # --- Ключевые слова для тем ---
@@ -58,47 +73,38 @@ label_translation = {
 # --- Функция для мульти-тем ---
 def assign_multilabels(text):
     text_lower = text.lower()
-    labels = []
-    for label, keywords in label_keywords.items():
-        if any(keyword in text_lower for keyword in keywords):
-            labels.append(label)
+    labels = [label for label, kws in label_keywords.items() if any(k in text_lower for k in kws)]
     if not labels:
-        labels.append('general')
+        labels = ['general']
     return labels
 
-# --- Функция предсказания ---
-def ml_predict(text: str, idx: int, top_n=3):
-    # --- Быстрые темы через ключевые слова ---
-    labels = assign_multilabels(text)
-    topics = [label_translation.get(label, label) for label in labels]
+def ml_predict(text: str, idx: int):
+    embed_model, sentiment_clf, topic_model, vectorizer = get_models()
 
-    # --- Если темы не найдены, fallback на нейронку ---
-    if labels == ['general']:
-        embedding = embed_model.encode([text], show_progress_bar=False)
-        topic_probs = topic_model.predict_proba(embedding)[0]
-        all_topics = ['Общее', 'Мобильное приложение', 'Кредиты', 'Вклады', 'Бонусы',
-                      'Служба поддержки', 'Безопасность', 'Переводы', 'Приложение',
-                      'Сеть банкоматов', 'Платежи', 'Комиссии', 'Инвестиции']
-        top_indices = np.argsort(topic_probs)[-top_n:][::-1]
-        topics = [all_topics[i] for i in top_indices]
+    # 🔹 Темы
+    topics = [label_translation.get(label, label) for label in assign_multilabels(text)]
 
-    # --- Сентимент через BoW ---
-    X_vec = vectorizer.transform([text])
-    sentiment_pred = sentiment_clf.predict(X_vec)
-    sentiment_prob = sentiment_clf.predict_proba(X_vec)[0]
-    sentiment_dict = dict(zip(sentiment_clf.classes_, sentiment_prob))
+    # 🔹 ML-топики (если все темы == 'Общее')
+    if topics == ['Общее'] and topic_model is not None and vectorizer is not None:
+        emb = embed_model.encode([text], show_progress_bar=False)
+        probs = topic_model.predict_proba(emb)[0]
+        top_indices = np.argsort(probs)[-3:][::-1]  # топ-3
+        topic_names = getattr(topic_model, "classes_", [f"Тема {i}" for i in range(len(probs))])
+        topics = [topic_names[i] for i in top_indices]
 
-    sentiments = [sentiment_pred[0]]
-    if sentiment_dict.get("neutral", 0) > 0.07 and "neutral" not in sentiments:
-        sentiments.append("neutral")
+    # 🔹 Сентимент
+    sentiments = []
+    if sentiment_clf is not None and vectorizer is not None:
+        X_vec = vectorizer.transform([text])
+        pred = sentiment_clf.predict(X_vec)[0]
+        probs = sentiment_clf.predict_proba(X_vec)[0]
+        if "neutral" in sentiment_clf.classes_:
+            neutral_idx = list(sentiment_clf.classes_).index("neutral")
+            if probs[neutral_idx] >= max(probs):
+                pred = "neutral"
+        sentiments = [pred]
 
-    return {
-        "id": idx,
-        "text": text,
-        "topics": topics,
-        "sentiments": sentiments,
-        "sentiment_prob": sentiment_dict
-    }
+    return {"id": idx, "text": text, "topics": topics, "sentiments": sentiments}
 
 
 @app.get("/", response_class=HTMLResponse)
